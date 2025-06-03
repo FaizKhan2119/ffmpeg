@@ -1,5 +1,15 @@
-FROM n8nio/n8n
+FROM node:18-bullseye
 
-USER root
+# Install ffmpeg
 RUN apt-get update && apt-get install -y ffmpeg
-USER node
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+EXPOSE 3000
+
+CMD ["npm", "start"]
