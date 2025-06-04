@@ -1,17 +1,13 @@
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const ffmpeg = require('fluent-ffmpeg');
-const FormData = require('form-data');
+const path = require('path');
 const stream = require('stream');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
-
-const BASEROW_API_TOKEN = 'ScxWSflaJ1UgCBeI8KC5NRMp8ZBUsjqC';
-const BASEROW_TABLE_ID = 560768;
-const BASEROW_ROW_ID = 1036455;
-const BASEROW_FILE_FIELD_ID = 4508039;
 
 app.get('/', (req, res) => {
   res.send('🎬 FFmpeg API is running');
@@ -19,13 +15,19 @@ app.get('/', (req, res) => {
 
 app.post('/image-audio-video', async (req, res) => {
   try {
-    const { imageUrl, audioUrl, filename = 'output.mp4' } = req.body;
+    const { imageUrl, audioUrl } = req.body;
 
     if (!imageUrl || !audioUrl) {
       return res.status(400).json({ error: 'imageUrl and audioUrl are required.' });
     }
 
+    // Generate temp file paths
+    const id = uuidv4();
+    const tempImagePath = path.join(__dirname, `${id}.jpg`);
+
     console.log('⬇️ Downloading image and audio...');
+
+    // Download image and audio as buffers
     const [imageResp, audioResp] = await Promise.all([
       axios.get(imageUrl, { responseType: 'arraybuffer' }),
       axios.get(audioUrl, { responseType: 'arraybuffer' }),
@@ -34,102 +36,78 @@ app.post('/image-audio-video', async (req, res) => {
     const imageBuffer = Buffer.from(imageResp.data);
     const audioBuffer = Buffer.from(audioResp.data);
 
-    // Get audio duration using ffprobe
-    const getAudioDuration = () =>
-      new Promise((resolve, reject) => {
-        const readableAudioStream = new stream.PassThrough();
-        readableAudioStream.end(audioBuffer);
+    // Save image to disk (temp)
+    fs.writeFileSync(tempImagePath, imageBuffer);
 
-        ffmpeg(readableAudioStream)
-          .ffprobe((err, metadata) => {
-            if (err) reject(err);
-            else resolve(metadata.format.duration);
+    // Get audio duration
+    const videoDuration = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(audioBuffer, (err, metadata) => {
+        if (err) {
+          // Try with temp file fallback
+          const tempAudioPath = path.join(__dirname, `${id}.mp3`);
+          fs.writeFileSync(tempAudioPath, audioBuffer);
+          ffmpeg.ffprobe(tempAudioPath, (e2, meta2) => {
+            fs.unlinkSync(tempAudioPath);
+            if (e2) reject(e2);
+            else resolve(meta2.format.duration);
           });
+        } else resolve(metadata.format.duration);
       });
-
-    const videoDuration = await getAudioDuration();
-    console.log(`Audio duration: ${videoDuration}s`);
-
-    // Generate video with ffmpeg in memory and get buffer
-    const generateVideoBuffer = () =>
-      new Promise((resolve, reject) => {
-        const videoChunks = [];
-        const readableImageStream = new stream.PassThrough();
-        readableImageStream.end(imageBuffer);
-
-        const readableAudioStream = new stream.PassThrough();
-        readableAudioStream.end(audioBuffer);
-
-        const command = ffmpeg()
-          .input(readableImageStream)
-          .inputFormat('image2pipe')
-          .loop(videoDuration)
-          .input(readableAudioStream)
-          .inputFormat('mp3')
-          .videoFilters([
-            "zoompan=z='min(zoom+0.0015,1.5)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
-            'scale=1080:1920',
-          ])
-          .outputOptions([
-            '-c:v libx264',
-            '-tune stillimage',
-            '-pix_fmt yuv420p',
-            `-t ${videoDuration}`,
-            '-movflags frag_keyframe+empty_moov', // for streaming mp4
-          ])
-          .format('mp4')
-          .on('error', (err) => {
-            reject(err);
-          })
-          .on('end', () => {
-            resolve(Buffer.concat(videoChunks));
-          })
-          .pipe();
-
-        command.on('data', (chunk) => {
-          videoChunks.push(chunk);
-        });
-      });
-
-    console.log('🎥 Generating video buffer...');
-    const videoBuffer = await generateVideoBuffer();
-    console.log(`✅ Video generated in memory, size: ${videoBuffer.length} bytes`);
-
-    // Upload video buffer to Baserow
-    const uploadToBaserow = async () => {
-      const form = new FormData();
-      form.append(`field_${BASEROW_FILE_FIELD_ID}`, videoBuffer, {
-        filename,
-        contentType: 'video/mp4',
-      });
-
-      const url = `https://api.baserow.io/api/database/rows/table/${BASEROW_TABLE_ID}/${BASEROW_ROW_ID}/`;
-
-      const response = await axios.patch(url, form, {
-        headers: {
-          ...form.getHeaders(),
-          Authorization: `Token ${BASEROW_API_TOKEN}`,
-        },
-      });
-
-      return response.data;
-    };
-
-    console.log('⬆️ Uploading video to Baserow...');
-    const baserowResponse = await uploadToBaserow();
-    console.log('✅ Upload complete:', baserowResponse);
-
-    res.json({
-      message: 'Video generated and uploaded to Baserow successfully',
-      baserowResponse,
     });
+
+    console.log(`Audio duration: ${videoDuration}s`);
+    console.log('⬇️ Starting FFmpeg...');
+
+    // Create readable stream from audio buffer
+    const audioStream = new stream.PassThrough();
+    audioStream.end(audioBuffer);
+
+    // Prepare to collect video chunks
+    const videoChunks = [];
+
+    ffmpeg()
+      .input(tempImagePath)
+      .loop(videoDuration)
+      .input(audioStream)
+      .inputFormat('mp3')
+      .videoFilters([
+        "zoompan=z='min(zoom+0.0015,1.5)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
+        'scale=1080:1920',
+      ])
+      .outputOptions([
+        '-c:v libx264',
+        '-tune stillimage',
+        '-pix_fmt yuv420p',
+        `-t ${videoDuration}`,
+        '-movflags frag_keyframe+empty_moov',
+      ])
+      .format('mp4')
+      .on('error', (err) => {
+        console.error('❌ FFmpeg error:', err.message);
+        fs.unlinkSync(tempImagePath);
+        res.status(500).json({ error: 'Failed to create video', details: err.message });
+      })
+      .on('end', () => {
+        fs.unlinkSync(tempImagePath);
+        const videoBuffer = Buffer.concat(videoChunks);
+        console.log('✅ FFmpeg complete, sending video...');
+        res.set({
+          'Content-Type': 'video/mp4',
+          'Content-Length': videoBuffer.length,
+        });
+        res.send(videoBuffer);
+      })
+      .pipe()
+      .on('data', (chunk) => {
+        videoChunks.push(chunk);
+      });
+
   } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    console.error('❌ Unexpected error:', error.message);
+    res.status(500).json({ error: 'Unexpected server error', details: error.message });
   }
 });
 
-const PORT = 10000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+app.listen(10000, () => {
+  console.log('Running on port 10000');
 });
