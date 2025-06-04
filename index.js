@@ -54,4 +54,15 @@ async function generateVideo(imageUrl, audioUrl) {
         fs.unlinkSync(videoPath);
         console.log("✅ Cleaned up.");
       })
-      .on(
+      .on('error', (err) => {
+        console.error('❌ FFmpeg error:', err.message);
+      })
+      .run();
+
+  } catch (err) {
+    console.error('❌ Error during video creation:', err.message);
+  }
+}
+
+// 🟢 Trigger this job ONCE when the worker starts
+generateVideo('https://static.toiimg.com/photo/msid-121613446,imgsize-1499322.cms', 'https://ttsmp3.com/created_mp3/861b5df98345b56b79e2747223012882.mp3');
