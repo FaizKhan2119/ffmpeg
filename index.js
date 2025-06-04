@@ -72,11 +72,12 @@ app.post('/image-audio-video', async (req, res) => {
       .inputFormat('mp3')
       .videoFilters([
         "zoompan=z='min(zoom+0.0015,1.5)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'",
-        'scale=1080:1920',
+        'scale=720:1280',
       ])
       .outputOptions([
         '-c:v libx264',
         '-tune stillimage',
+        '-preset ultrafast',           // 🔥 Add this line
         '-pix_fmt yuv420p',
         `-t ${videoDuration}`,
         '-movflags frag_keyframe+empty_moov',
