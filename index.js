@@ -1,78 +1,85 @@
 const express = require('express');
-const ffmpeg = require('fluent-ffmpeg');
-const fs = require('fs');
 const axios = require('axios');
-const path = require('path');
+const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const ffmpeg = require('fluent-ffmpeg');
+const path = require('path');
 
 const app = express();
-const port = process.env.PORT || 3000;
+app.use(express.json({ limit: '50mb' }));
 
-app.use(express.json());
-
-const inputDir = path.join(__dirname, 'inputs');
-const outputDir = path.join(__dirname, 'outputs');
-
-if (!fs.existsSync(inputDir)) fs.mkdirSync(inputDir);
-if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
-
-// 🧩 Route 1: Merge image + audio with zoom out animation
-app.post('/image-audio-video', async (req, res) => {
-  const { imageUrl, audioUrl } = req.body;
-
-  if (!imageUrl || !audioUrl) {
-    return res.status(400).send('Missing imageUrl or audioUrl');
-  }
-
-  const id = uuidv4();
-  const imagePath = path.join(inputDir, `${id}.jpg`);
-  const audioPath = path.join(inputDir, `${id}.mp3`);
-  const outputPath = path.join(outputDir, `final_${id}.mp4`);
-
-  try {
-    // Download image
-    const imgResp = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-    fs.writeFileSync(imagePath, imgResp.data);
-
-    // Download audio
-    const audioResp = await axios.get(audioUrl, { responseType: 'arraybuffer' });
-    fs.writeFileSync(audioPath, audioResp.data);
-
-    // Apply zoom-out + 9:16 scaling
-    const zoomFilter = `zoompan=z='if(lte(zoom,1.0),zoom+0.001,zoom)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)',scale=1080:1920,setsar=1`;
-
-    ffmpeg()
-      .input(imagePath)
-      .loop() // Loop infinitely — we cut later with -shortest
-      .videoFilters(zoomFilter)
-      .input(audioPath)
-      .audioCodec('aac')
-      .videoCodec('libx264')
-      .outputOptions(['-pix_fmt yuv420p', '-shortest'])
-      .output(outputPath)
-      .on('end', () => {
-        fs.unlinkSync(imagePath);
-        fs.unlinkSync(audioPath);
-        res.download(outputPath, () => fs.unlinkSync(outputPath));
-      })
-      .on('error', (err) => {
-        console.error('ffmpeg error:', err);
-        res.status(500).send('Video generation failed');
-      })
-      .run();
-
-  } catch (err) {
-    console.error('Download error:', err);
-    res.status(500).send('Download or processing failed');
-  }
-});
-
-// ✅ Default route
 app.get('/', (req, res) => {
   res.send('🎬 FFmpeg API is running');
 });
 
-// 🚀 Start server
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`);
+app.post('/image-audio-video', async (req, res) => {
+  try {
+    const { imageUrl, audioUrl } = req.body;
+
+    if (!imageUrl || !audioUrl) {
+      return res.status(400).json({ error: 'imageUrl and audioUrl are required.' });
+    }
+
+    const id = uuidv4();
+    const imagePath = path.join(__dirname, `${id}.jpg`);
+    const audioPath = path.join(__dirname, `${id}.mp3`);
+    const videoPath = path.join(__dirname, `${id}.mp4`);
+
+    console.log(`⬇️ Downloading files...`);
+
+    const [imageResp, audioResp] = await Promise.all([
+      axios.get(imageUrl, { responseType: 'arraybuffer' }),
+      axios.get(audioUrl, { responseType: 'arraybuffer' })
+    ]);
+
+    fs.writeFileSync(imagePath, imageResp.data);
+    fs.writeFileSync(audioPath, audioResp.data);
+
+    console.log(`✅ Files saved. Starting FFmpeg...`);
+
+    const videoDuration = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(audioPath, (err, metadata) => {
+        if (err) reject(err);
+        else resolve(metadata.format.duration);
+      });
+    });
+
+    ffmpeg()
+      .addInput(imagePath)
+      .loop(videoDuration)
+      .addInput(audioPath)
+      .videoFilters([
+        'zoompan=z=\'min(zoom+0.0015,1.5)\':d=1:x=\'iw/2-(iw/zoom/2)\':y=\'ih/2-(ih/zoom/2)\'',
+        'scale=1080:1920'
+      ])
+      .outputOptions([
+        '-c:v libx264',
+        '-tune stillimage',
+        '-pix_fmt yuv420p',
+        `-t ${videoDuration}`
+      ])
+      .output(videoPath)
+      .on('end', () => {
+        console.log(`✅ FFmpeg complete, sending video...`);
+        res.sendFile(videoPath, () => {
+          fs.unlinkSync(imagePath);
+          fs.unlinkSync(audioPath);
+          fs.unlinkSync(videoPath);
+        });
+      })
+      .on('error', (err) => {
+        console.error('❌ FFmpeg error:', err.message);
+        res.status(500).json({ error: 'Failed to create video', details: err.message });
+      })
+      .run();
+
+  } catch (error) {
+    console.error('❌ Unexpected error:', error.message);
+    res.status(500).json({ error: 'Unexpected server error', details: error.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
