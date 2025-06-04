@@ -1,15 +1,16 @@
-FROM node:18-bullseye
+FROM node:18
 
 # Install ffmpeg
 RUN apt-get update && apt-get install -y ffmpeg
 
+# Set app directory
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
-
+# Copy files
 COPY . .
 
-EXPOSE 3000
+# Install dependencies
+RUN npm install
 
-CMD ["npm", "start"]
+# Start the worker
+CMD ["node", "index.js"]
